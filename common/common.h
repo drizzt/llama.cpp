@@ -96,6 +96,7 @@ enum llama_example {
     LLAMA_EXAMPLE_FIT_PARAMS,
     LLAMA_EXAMPLE_RESULTS,
     LLAMA_EXAMPLE_EXPORT_GRAPH_OPS,
+    LLAMA_EXAMPLE_NLLB,
 
     LLAMA_EXAMPLE_COUNT,
 };
@@ -481,6 +482,9 @@ struct common_params {
     std::set<std::string> model_tags;      // model tags (informational, not used for routing)              // NOLINT
     std::string hf_token             = ""; // HF token                                                      // NOLINT
     std::string prompt               = "";                                                                  // NOLINT
+    std::string nllb_src_lang        = "";                                                                  // NOLINT
+    std::string nllb_tgt_lang        = "";                                                                  // NOLINT
+    int32_t     nllb_beam_size       = 1;                                                                   // NOLINT
     std::string system_prompt        = "";                                                                  // NOLINT
     std::string prompt_file          = ""; // store the external prompt file name                           // NOLINT
     std::string path_prompt_cache    = ""; // path to file for saving/loading prompt eval state             // NOLINT
