@@ -188,6 +188,8 @@ static llama_model * llama_model_mapping(llm_arch arch, const llama_model_params
             return new llama_model_t5(params);
         case LLM_ARCH_T5ENCODER:
             return new llama_model_t5encoder(params);
+        case LLM_ARCH_NLLB:
+            return new llama_model_nllb(params);
         case LLM_ARCH_JAIS:
             return new llama_model_jais(params);
         case LLM_ARCH_JAIS2:
@@ -2244,6 +2246,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_JINA_BERT_V2:
         case LLM_ARCH_T5:
         case LLM_ARCH_T5ENCODER:
+        case LLM_ARCH_NLLB:
         case LLM_ARCH_JAIS:
         case LLM_ARCH_RWKV6:
         case LLM_ARCH_RWKV6QWEN2:
@@ -2479,6 +2482,7 @@ bool llama_model_has_encoder(const llama_model * model) {
     switch (model->arch) {
         case LLM_ARCH_T5:        return true;
         case LLM_ARCH_T5ENCODER: return true;
+        case LLM_ARCH_NLLB:      return true;
         default:                 return false;
     }
 }

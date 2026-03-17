@@ -10,6 +10,7 @@
 
 #include <functional>
 #include <algorithm>
+#include <cctype>
 #include <thread>
 #include <mutex>
 #include <condition_variable>
@@ -360,6 +361,11 @@ void server_models::load_models() {
         return p.options;
     };
 
+    auto get_hidden = [](const common_preset & preset) {
+        std::string val;
+        return preset.get_option(COMMON_ARG_PRESET_HIDDEN, val) && common_arg_utils::is_truthy(val);
+    };
+
     // Phase 2: acquire the lock once for all mapping mutations.
     // We temporarily release it only when calling functions that acquire it internally
     // (unload, load) or when joining threads (the monitoring thread calls update_status
@@ -383,6 +389,7 @@ void server_models::load_models() {
                 /* exit_code    */ 0,
                 /* stop_timeout */ DEFAULT_STOP_TIMEOUT,
                 /* multimodal   */ mtmd_caps{false, false},
+                /* hidden       */ get_hidden(preset),
             };
             add_model(std::move(meta));
         }
@@ -479,6 +486,7 @@ void server_models::load_models() {
             if (it == final_presets.end()) continue; // erased above
 
             inst.meta.preset = it->second;
+            inst.meta.hidden = get_hidden(inst.meta.preset);
 
             // re-parse aliases, then validate against other models
             std::set<std::string> new_aliases;
@@ -536,6 +544,7 @@ void server_models::load_models() {
                     /* exit_code    */ 0,
                     /* stop_timeout */ DEFAULT_STOP_TIMEOUT,
                     /* multimodal   */ mtmd_caps{false, false},
+                    /* hidden       */ get_hidden(preset),
                 };
                 add_model(std::move(meta));
                 newly_added.push_back(name);
@@ -1022,7 +1031,29 @@ bool server_models::ensure_model_ready(const std::string & name) {
     return true;
 }
 
-server_http_res_ptr server_models::proxy_request(const server_http_req & req, const std::string & method, const std::string & name, bool update_last_used) {
+std::string server_models::find_compatible_loaded_model(const std::string & name) {
+    std::unique_lock<std::mutex> lk(mutex);
+    auto it = mapping.find(name);
+    if (it == mapping.end()) {
+        return "";
+    }
+    std::string target_id = it->second.meta.preset.get_model_id();
+    if (target_id.empty()) {
+        return "";
+    }
+    for (const auto & [key, inst] : mapping) {
+        if (key == name) {
+            continue;
+        }
+        if (inst.meta.status == SERVER_MODEL_STATUS_LOADED &&
+                inst.meta.preset.get_model_id() == target_id) {
+            return key;
+        }
+    }
+    return "";
+}
+
+server_http_res_ptr server_models::proxy_request(const server_http_req & req, const std::string & method, const std::string & name, bool update_last_used, const std::string & body_override) {
     auto meta = get_meta(name);
     if (!meta.has_value()) {
         throw std::runtime_error("model name=" + name + " is not found");
@@ -1039,19 +1070,30 @@ server_http_res_ptr server_models::proxy_request(const server_http_req & req, co
     if (!req.query_string.empty()) {
         proxy_path += '?' + req.query_string;
     }
-    auto proxy = std::make_unique<server_http_proxy>(
-            method,
-            "http",
-            CHILD_ADDR,
-            meta->port,
-            proxy_path,
-            req.headers,
-            req.body,
-            req.files,
-            req.should_stop,
-            base_params.timeout_read,
-            base_params.timeout_write
-            );
+    std::map<std::string, std::string> headers;
+    for (const auto & h : req.headers) {
+        std::string key = h.first;
+        std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+        headers[key] = h.second;
+    }
+
+    if (!body_override.empty()) {
+        headers["content-length"] = std::to_string(body_override.size());
+    }
+
+     auto proxy = std::make_unique<server_http_proxy>(
+             method,
+             "http",
+             CHILD_ADDR,
+             meta->port,
+             proxy_path,
+             headers,
+             body_override.empty() ? req.body : body_override,
+             req.files,
+             req.should_stop,
+             base_params.timeout_read,
+             base_params.timeout_write
+             );
     return proxy;
 }
 
@@ -1197,6 +1239,47 @@ void server_models_routes::init_routes() {
         std::string name = json_value(body, "model", std::string());
         bool autoload = is_autoload(params, req);
         auto error_res = std::make_unique<server_http_res>();
+
+        // when autoload is enabled and the requested model is not loaded,
+        // check if a compatible model (same physical file, different alias) is already loaded.
+        // if so, inject the requested preset's sampling defaults and route there instead.
+        if (autoload && !name.empty()) {
+            auto meta = models.get_meta(name);
+            if (meta.has_value() && meta->status != SERVER_MODEL_STATUS_LOADED) {
+                std::string compat = models.find_compatible_loaded_model(name);
+                if (!compat.empty()) {
+                    SRV_INF("model name=%s not loaded, routing to compatible loaded model name=%s\n",
+                            meta->name.c_str(), compat.c_str());
+                    auto compat_meta = models.get_meta(compat);
+                    json defaults = json::parse(meta->preset.to_json_sampling(compat_meta.has_value() ? &compat_meta->preset : nullptr));
+                    json body_injected = body;
+                    for (auto & [key, val] : defaults.items()) {
+                        if (key == "chat_template_kwargs") {
+                            if (!body_injected.contains("chat_template_kwargs") ||
+                                    !body_injected["chat_template_kwargs"].is_object()) {
+                                body_injected["chat_template_kwargs"] = json::object();
+                            }
+                            for (auto & [k, v] : val.items()) {
+                                if (!body_injected["chat_template_kwargs"].contains(k)) {
+                                    body_injected["chat_template_kwargs"][k] = v;
+                                }
+                            }
+                        } else if (!body_injected.contains(key)) {
+                            body_injected[key] = val;
+                        }
+                    }
+                    try {
+                        return models.proxy_request(req, method, compat, true, body_injected.dump());
+                    } catch (const std::invalid_argument &) {
+                        // compat model was unloaded between our check and the proxy call;
+                        // fall through to normal autoload path below
+                        SRV_WRN("model name=%s was unloaded before proxy, falling back to normal load\n",
+                                compat.c_str());
+                    }
+                }
+            }
+        }
+
         if (!router_validate_model(name, models, autoload, error_res)) {
             return error_res;
         }
@@ -1231,6 +1314,9 @@ void server_models_routes::init_routes() {
         auto all_models = models.get_all_meta();
         std::time_t t = std::time(0);
         for (const auto & meta : all_models) {
+            if (meta.hidden) {
+                continue;
+            }
             json status {
                 {"value",  server_model_status_to_string(meta.status)},
                 {"args",   meta.args},
