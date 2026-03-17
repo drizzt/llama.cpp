@@ -85,6 +85,7 @@ class ServerProcess:
     pooling: str | None = None
     api_key: str | None = None
     models_dir: str | None = None
+    models_preset: str | None = None
     models_max: int | None = None
     no_models_autoload: bool | None = None
     lora_files: List[str] | None = None
@@ -135,11 +136,11 @@ class ServerProcess:
             self.server_host,
             "--port",
             self.server_port,
-            "--temp",
-            self.temperature,
-            "--seed",
-            self.seed,
         ]
+        if self.temperature is not None:
+            server_args.extend(["--temp", self.temperature])
+        if self.seed is not None:
+            server_args.extend(["--seed", self.seed])
         if self.offline:
             server_args.append("--offline")
         if self.model_file:
@@ -154,6 +155,8 @@ class ServerProcess:
             server_args.extend(["--hf-file", self.model_hf_file])
         if self.models_dir:
             server_args.extend(["--models-dir", self.models_dir])
+        if self.models_preset:
+            server_args.extend(["--models-preset", self.models_preset])
         if self.models_max is not None:
             server_args.extend(["--models-max", self.models_max])
         if self.n_batch:
