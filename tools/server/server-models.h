@@ -65,6 +65,7 @@ struct server_model_meta {
     std::vector<std::string> args; // args passed to the model instance, will be populated by render_args()
     int exit_code = 0; // exit code of the model instance process (only valid if status == FAILED)
     int stop_timeout = 0; // seconds to wait before force-killing the model instance during shutdown
+    bool hidden = false;  // if true, exclude from /models endpoint
 
     bool is_ready() const {
         return status == SERVER_MODEL_STATUS_LOADED;
@@ -147,8 +148,13 @@ public:
     // otherwise, load the model and blocking wait until it's ready, then return true (meta may need to be refreshed)
     bool ensure_model_ready(const std::string & name);
 
+    // find a loaded model that points to the same physical model file as the given model name (thread-safe)
+    // returns the canonical name of the compatible model, or empty string if none found
+    std::string find_compatible_loaded_model(const std::string & name);
+
     // proxy an HTTP request to the model instance
-    server_http_res_ptr proxy_request(const server_http_req & req, const std::string & method, const std::string & name, bool update_last_used);
+    // if body_override is non-empty, it is used instead of req.body
+    server_http_res_ptr proxy_request(const server_http_req & req, const std::string & method, const std::string & name, bool update_last_used, const std::string & body_override = "");
 
     // return true if the current process is a child server instance
     static bool is_child_server();
