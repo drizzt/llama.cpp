@@ -597,8 +597,26 @@ static bool common_params_parse_ex(int argc, char ** argv, common_params_context
 
     // model is required (except for server)
     // TODO @ngxson : maybe show a list of available models in CLI in this case
+    std::string err;
     if (params.model.path.empty() && ctx_arg.ex != LLAMA_EXAMPLE_SERVER && !skip_model_download && !params.usage && !params.completion) {
-        throw std::invalid_argument("error: --model is required\n");
+        err += "error: --model is required\n";
+    }
+
+    // NLLB specific requirements
+    if (ctx_arg.ex == LLAMA_EXAMPLE_NLLB && !params.usage && !params.completion) {
+        if (params.nllb_src_lang.empty()) {
+            err += "error: --src-lang is required\n";
+        }
+        if (params.nllb_tgt_lang.empty()) {
+            err += "error: --tgt-lang is required\n";
+        }
+        if (params.prompt.empty()) {
+            err += "error: --prompt is required\n";
+        }
+    }
+
+    if (!err.empty()) {
+        throw std::invalid_argument(err);
     }
 
     if (params.escape) {
@@ -3887,6 +3905,30 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
             params.use_jinja = true;
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER, LLAMA_EXAMPLE_CLI}));
+
+    add_opt(common_arg(
+        {"-sl", "--src-lang"}, "LANG",
+        string_format("source language code"),
+        [](common_params & params, const std::string & value) {
+            params.nllb_src_lang = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_NLLB}));
+
+    add_opt(common_arg(
+        {"-tl", "--tgt-lang"}, "LANG",
+        string_format("target language code"),
+        [](common_params & params, const std::string & value) {
+            params.nllb_tgt_lang = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_NLLB}));
+
+    add_opt(common_arg(
+        {"--beam-size"}, "N",
+        string_format("beam size for beam search (default: %d, greedy)", params.nllb_beam_size),
+        [](common_params & params, int value) {
+            params.nllb_beam_size = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_NLLB}));
 
     return ctx_arg;
 }

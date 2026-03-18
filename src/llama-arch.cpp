@@ -82,6 +82,7 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
     { LLM_ARCH_BITNET,           "bitnet"           },
     { LLM_ARCH_T5,               "t5"               },
     { LLM_ARCH_T5ENCODER,        "t5encoder"        },
+    { LLM_ARCH_NLLB,             "nllb"             },
     { LLM_ARCH_JAIS,             "jais"             },
     { LLM_ARCH_JAIS2,            "jais2"            },
     { LLM_ARCH_NEMOTRON,         "nemotron"         },
