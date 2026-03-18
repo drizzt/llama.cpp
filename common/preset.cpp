@@ -217,7 +217,7 @@ std::string common_preset::to_json_sampling(const common_preset * base) const {
     auto inject_opt = [&](const common_arg & opt, const std::string & val) {
         if (opt.args.empty()) return;
         const std::string first_arg = opt.args[0];
-        if (opt.is_sparam) {
+                if (opt.is_sampling) {
             auto it = sparam_to_json.find(first_arg);
             if (it != sparam_to_json.end()) {
                 try {
@@ -258,7 +258,7 @@ std::string common_preset::to_json_sampling(const common_preset * base) const {
             }
 
             if (is_missing) {
-                if (opt.is_sparam) {
+        if (opt.is_sampling) {
                     auto it = sparam_to_json.find(first_arg);
                     if (it != sparam_to_json.end()) {
                         result[it->second.json_key] = json::parse(it->second.default_val);
