@@ -1,0 +1,221 @@
+name: Sync with Upstream
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # Every 6 hours
+  workflow_dispatch: # Manual trigger
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: master
+          fetch-depth: 0
+          token: ${{ secrets.PAT }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add Upstream
+        run: git remote add upstream https://github.com/ggml-org/llama.cpp.git
+
+      - name: Fetch Upstream
+        run: git fetch upstream master
+
+      - name: Rebase from Upstream
+        id: rebase
+        continue-on-error: true
+        run: git rebase upstream/master
+
+      - name: Install Kilo CLI
+        if: steps.rebase.outcome == 'failure'
+        run: npm install -g @kilocode/cli
+
+      - name: Resolve Conflicts
+        if: steps.rebase.outcome == 'failure'
+        env:
+          KILO_API_KEY: ${{ secrets.KILO_API_KEY }}
+          KILO_MODEL: ${{ vars.KILO_MODEL }}
+        run: |
+          verify_rebase_done() {
+            if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
+              echo "Rebase is still active after conflict resolution."
+              git status --short
+              exit 1
+            fi
+            if git ls-files -u | grep -q .; then
+              echo "Unmerged paths remain after conflict resolution."
+              git ls-files -u
+              exit 1
+            fi
+          }
+
+          kilo run --auto \
+            --model "${KILO_MODEL:-kilo/kilo-auto/free}" \
+            "$(cat <<'EOF'
+          The repository is mid-rebase with conflicts. Run \`git status\` first to
+          see which files are conflicted. For each conflicted file:
+          1. Read both sides of the conflict markers carefully.
+          2. This is a fork of llama.cpp with custom patches. The fork's changes
+             (<<<<<<< HEAD) are intentional divergence and must be preserved.
+          3. Adapt the fork's patch to upstream's new code if upstream refactored
+             the surrounding area; do not silently drop our changes.
+          4. If upstream already merged equivalent functionality, prefer upstream's
+             version and drop ours only if they are truly redundant.
+          5. \`git add\` each file after resolving, then \`git rebase --continue\`.
+          6. If a conflict is too ambiguous to resolve safely, abort with
+             \`git rebase --abort\`, create a file REBASE_NOTES.md explaining which
+             commit and file need human review, and exit 1.
+          EOF
+          )"
+
+          verify_rebase_done
+
+      - name: Configure Build
+        id: configure
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cmake -B build -DGGML_NATIVE=OFF -DGGML_BACKEND_DL=OFF -DLLAMA_CURL=OFF 2>&1 | tee configure.log
+
+      - name: Build
+        id: build
+        continue-on-error: true
+        run: |
+          set -o pipefail
+          cmake --build build -j$(nproc) 2>&1 | tee build.log
+
+      - name: Install Kilo CLI (for build fix)
+        if: ${{ always() && (steps.configure.outcome == 'failure' || steps.build.outcome == 'failure') }}
+        run: command -v kilo || npm install -g @kilocode/cli
+
+      - name: Fix Build Errors
+        id: fix_build
+        if: ${{ always() && (steps.configure.outcome == 'failure' || steps.build.outcome == 'failure') }}
+        continue-on-error: true
+        env:
+          KILO_API_KEY: ${{ secrets.KILO_API_KEY }}
+          KILO_MODEL: ${{ vars.KILO_MODEL }}
+        run: |
+          set -o pipefail
+
+          verify_clean_rebase() {
+            if [ -d .git/rebase-merge ] || [ -d .git/rebase-apply ]; then
+              echo "Rebase is still active after build-fix attempt."
+              git status --short
+              return 1
+            fi
+            if git ls-files -u | grep -q .; then
+              echo "Unmerged paths remain after build-fix attempt."
+              git ls-files -u
+              return 1
+            fi
+            if ! git diff --quiet || ! git diff --cached --quiet; then
+              echo "Build-fix attempt left uncommitted changes."
+              git status --short
+              return 1
+            fi
+          }
+
+          prompt="$(cat <<'EOF'
+          The rebase succeeded but the CPU-only build is broken. The failing
+          build output is in build.log at the repo root. Your task:
+          1. Read build.log and find the FIRST compilation error (ignore warnings
+             and cascading errors further down — fix the root cause only).
+          2. This is a fork of llama.cpp with custom patches on top of upstream.
+             The error is almost certainly in the fork's patches, caused by
+             upstream refactoring an API the patch depended on.
+          3. Read the relevant source file(s) and understand what changed upstream.
+             Use \`git log --oneline upstream/master -- <file>\` to see recent
+             upstream changes if helpful.
+          4. Fix the fork's code to match upstream's new API. Preserve the
+             INTENT of the patch — do not delete functionality to make the
+             build pass.
+          5. Rebuild with \`cmake --build build -j$(nproc)\`. If it still fails,
+             repeat from step 1 with the new first error.
+          6. Hard limits: maximum 3 rebuild iterations. If still broken after 3,
+             write REBASE_NOTES.md explaining what you tried and what failed,
+             commit nothing, and exit 1.
+          7. On success: commit the fix with \`git commit --amend --no-edit\`
+             to fold it into the top fork commit (do NOT create a new commit).
+          EOF
+          )"
+
+          : > kilo-build-fix.log
+          for attempt in 1 2 3; do
+            echo "[*] Kilo build-fix attempt ${attempt}/3" | tee -a kilo-build-fix.log
+
+            set +e
+            kilo run --auto \
+              --model "${KILO_MODEL:-kilo/kilo-auto/free}" \
+              "$prompt" 2>&1 | tee kilo-build-fix-attempt.log
+            status=${PIPESTATUS[0]}
+            set -e
+
+            cat kilo-build-fix-attempt.log >> kilo-build-fix.log
+
+            if grep -Eiq 'provider_unavailable|Provider returned error' kilo-build-fix-attempt.log; then
+              echo "[!] Kilo provider failure detected" | tee -a kilo-build-fix.log
+              if [ "$attempt" -lt 3 ]; then
+                sleep 10
+                continue
+              fi
+              exit 1
+            fi
+
+            if [ "$status" -ne 0 ]; then
+              echo "[!] Kilo exited with status ${status}" | tee -a kilo-build-fix.log
+              exit "$status"
+            fi
+
+            if ! verify_clean_rebase; then
+              exit 1
+            fi
+
+            if cmake --build build -j$(nproc) 2>&1 | tee build.log; then
+              exit 0
+            fi
+
+            echo "[!] Build still fails after Kilo attempt ${attempt}" | tee -a kilo-build-fix.log
+          done
+
+          exit 1
+
+      - name: Verify Build After Fix
+        if: steps.fix_build.outcome == 'success'
+        run: |
+          cmake -B build -DGGML_NATIVE=OFF -DGGML_BACKEND_DL=OFF -DLLAMA_CURL=OFF
+          cmake --build build -j$(nproc)
+
+      - name: Stop Before Push If Preflight Failed
+        if: ${{ always() && (steps.configure.outcome == 'failure' || steps.build.outcome == 'failure') && steps.fix_build.outcome != 'success' }}
+        run: |
+          echo "Configure/build failed and the automated build fix did not complete successfully; refusing to push."
+          exit 1
+
+      - name: Ensure No Uncommitted Changes
+        run: |
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo "The workflow has uncommitted changes; refusing to push."
+            git status --short
+            exit 1
+          fi
+
+      - name: Push Changes
+        run: git push origin master --force-with-lease
+
+      - name: Trigger Build & Release Workflows
+        run: |
+          gh workflow run build.yml --ref master --repo ${{ github.repository }}
+          gh workflow run release.yml --ref master --repo ${{ github.repository }} -f create_release=true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
