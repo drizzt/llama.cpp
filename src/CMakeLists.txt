@@ -12,6 +12,7 @@ add_library(llama
             llama-adapter.cpp
             llama-arch.cpp
             llama-batch.cpp
+            beam-search/beam-search.cpp
             llama-chat.cpp
             llama-context.cpp
             llama-cparams.cpp
@@ -146,6 +147,8 @@ add_library(llama
             models/step35-iswa.cpp
             models/t5-dec.cpp
             models/t5-enc.cpp
+            models/nllb-dec.cpp
+            models/nllb-enc.cpp
             models/wavtokenizer-dec.cpp
             models/xverse.cpp
             )

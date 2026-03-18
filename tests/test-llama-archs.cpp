@@ -449,7 +449,7 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const gg
         }
 #endif // GGML_USE_WEBGPU
 
-        const bool encode = arch == LLM_ARCH_T5;
+        const bool encode = arch == LLM_ARCH_T5 || arch == LLM_ARCH_NLLB;
         for (bool moe : {false, true}) {
             if (moe && !moe_implemented(arch)) {
                 continue;
