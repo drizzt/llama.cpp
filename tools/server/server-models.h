@@ -138,8 +138,13 @@ public:
     // return false if model is already loaded; return true otherwise (meta may need to be refreshed)
     bool ensure_model_loaded(const std::string & name);
 
+    // find a loaded model that points to the same physical model file as the given model name (thread-safe)
+    // returns the canonical name of the compatible model, or empty string if none found
+    std::string find_compatible_loaded_model(const std::string & name);
+
     // proxy an HTTP request to the model instance
-    server_http_res_ptr proxy_request(const server_http_req & req, const std::string & method, const std::string & name, bool update_last_used);
+    // if body_override is non-empty, it is used instead of req.body
+    server_http_res_ptr proxy_request(const server_http_req & req, const std::string & method, const std::string & name, bool update_last_used, const std::string & body_override = "");
 
     // notify the router server that a model instance is ready
     // return the monitoring thread (to be joined by the caller)
