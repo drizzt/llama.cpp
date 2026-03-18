@@ -405,16 +405,16 @@ struct llm_build_mamba : public llm_build_mamba_base {
     llm_build_mamba(const llama_model & model, const llm_graph_params & params);
 };
 
-struct llm_build_mimo2_iswa : public llm_graph_context {
-    llm_build_mimo2_iswa(const llama_model & model, const llm_graph_params & params);
-};
-
 struct llm_build_minicpm3 : public llm_graph_context {
     llm_build_minicpm3(const llama_model & model, const llm_graph_params & params);
 };
 
 struct llm_build_minimax_m2 : public llm_graph_context {
     llm_build_minimax_m2(const llama_model & model, const llm_graph_params & params);
+};
+
+struct llm_build_mimo2_iswa : public llm_graph_context {
+    llm_build_mimo2_iswa(const llama_model & model, const llm_graph_params & params);
 };
 
 struct llm_build_mistral3 : public llm_graph_context {
@@ -693,6 +693,14 @@ struct llm_build_t5_dec : public llm_graph_context {
 
 struct llm_build_t5_enc : public llm_graph_context {
     llm_build_t5_enc(const llama_model & model, const llm_graph_params & params);
+};
+
+struct llm_build_nllb_dec : public llm_graph_context {
+    llm_build_nllb_dec(const llama_model & model, const llm_graph_params & params);
+};
+
+struct llm_build_nllb_enc : public llm_graph_context {
+    llm_build_nllb_enc(const llama_model & model, const llm_graph_params & params);
 };
 
 struct llm_build_wavtokenizer_dec : public llm_graph_context {

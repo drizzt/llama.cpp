@@ -1819,6 +1819,30 @@ void llama_model::load_hparams(llama_model_loader & ml) {
                 ml.get_key(LLM_KV_ATTENTION_RELATIVE_BUCKETS_COUNT, hparams.n_rel_attn_bkts);
                 type = LLM_TYPE_UNKNOWN;
             } break;
+        case LLM_ARCH_NLLB:
+            {
+                ml.get_key(LLM_KV_ATTENTION_LAYERNORM_EPS, hparams.f_norm_eps);
+
+                uint32_t dec_start_token_id;
+                if (ml.get_key(LLM_KV_DECODER_START_TOKEN_ID, dec_start_token_id, false)) {
+                    hparams.dec_start_token_id = dec_start_token_id;
+                }
+
+                hparams.dec_n_layer = hparams.n_layer;
+                ml.get_key(LLM_KV_DECODER_BLOCK_COUNT, hparams.dec_n_layer, false);
+
+                // Determine NLLB model type based on layer count
+                switch (hparams.n_layer) {
+                    case 12:
+                        switch (hparams.n_ff()) {
+                            case 2048: type = LLM_TYPE_700M; break; // nllb-200-distilled-600M (closest match)
+                            case 4096: type = LLM_TYPE_1_3B; break; // nllb-200-distilled-1.3B
+                            default: type = LLM_TYPE_UNKNOWN;
+                        } break;
+                    case 24: type = LLM_TYPE_3B; break; // nllb-200-3.3B
+                    default: type = LLM_TYPE_UNKNOWN;
+                }
+            } break;
         case LLM_ARCH_JAIS:
             {
                 ml.get_key(LLM_KV_ATTENTION_LAYERNORM_EPS, hparams.f_norm_eps);
@@ -5194,6 +5218,96 @@ bool llama_model::load_tensors(llama_model_loader & ml) {
                         layer.ffn_up_enc   = create_tensor(tn(LLM_TENSOR_ENC_FFN_UP,   "weight", i), {n_embd,   n_ff}, 0);
                     }
                 } break;
+            case LLM_ARCH_NLLB:
+                {
+                    tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
+                    // [AI] NLLB positional embeddings include M2M100 offset of +2
+                    pos_embd = create_tensor(tn(LLM_TENSOR_POS_EMBD,   "weight"), {n_embd, hparams.n_ctx_train + 2}, 0);
+
+                    // output
+                    output_norm_enc   = create_tensor(tn(LLM_TENSOR_ENC_OUTPUT_NORM, "weight"), {n_embd}, 0);
+                    output_norm_enc_b = create_tensor(tn(LLM_TENSOR_ENC_OUTPUT_NORM, "bias"),   {n_embd}, 0);
+                    output_norm   = create_tensor(tn(LLM_TENSOR_DEC_OUTPUT_NORM, "weight"), {n_embd}, 0);
+                    output_norm_b = create_tensor(tn(LLM_TENSOR_DEC_OUTPUT_NORM, "bias"),   {n_embd}, 0);
+                    output        = create_tensor(tn(LLM_TENSOR_OUTPUT,          "weight"), {n_embd, n_vocab}, TENSOR_NOT_REQUIRED);
+
+                    // if output is NULL, init from the input tok embed
+                    if (output == NULL) {
+                        output = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, TENSOR_DUPLICATED);
+                    }
+
+                    const int64_t n_embd_k_gqa = hparams.n_embd_k_gqa();
+                    const int64_t n_embd_v_gqa = hparams.n_embd_v_gqa();
+                    const int64_t n_ff = hparams.n_ff();
+                    const int dec_n_layer = hparams.dec_n_layer;
+
+                    if (dec_n_layer > n_layer) {
+                        layers.resize(dec_n_layer);
+                    }
+
+                    // [AI] Encoder layers (all have biases)
+                    for (int i = 0; i < n_layer; ++i) {
+                        auto & layer = layers[i];
+
+                        layer.attn_norm_enc   = create_tensor(tn(LLM_TENSOR_ENC_ATTN_NORM, "weight", i), {n_embd}, 0);
+                        layer.attn_norm_enc_b = create_tensor(tn(LLM_TENSOR_ENC_ATTN_NORM, "bias",   i), {n_embd}, 0);
+
+                        layer.wq_enc = create_tensor(tn(LLM_TENSOR_ENC_ATTN_Q,   "weight", i), {n_embd, n_embd_k_gqa}, 0);
+                        layer.bq_enc = create_tensor(tn(LLM_TENSOR_ENC_ATTN_Q,   "bias",   i), {n_embd_k_gqa}, 0);
+                        layer.wk_enc = create_tensor(tn(LLM_TENSOR_ENC_ATTN_K,   "weight", i), {n_embd, n_embd_k_gqa}, 0);
+                        layer.bk_enc = create_tensor(tn(LLM_TENSOR_ENC_ATTN_K,   "bias",   i), {n_embd_k_gqa}, 0);
+                        layer.wv_enc = create_tensor(tn(LLM_TENSOR_ENC_ATTN_V,   "weight", i), {n_embd, n_embd_v_gqa}, 0);
+                        layer.bv_enc = create_tensor(tn(LLM_TENSOR_ENC_ATTN_V,   "bias",   i), {n_embd_v_gqa}, 0);
+                        layer.wo_enc = create_tensor(tn(LLM_TENSOR_ENC_ATTN_OUT, "weight", i), {n_embd_v_gqa, n_embd}, 0);
+                        layer.bo_enc = create_tensor(tn(LLM_TENSOR_ENC_ATTN_OUT, "bias",   i), {n_embd}, 0);
+
+                        layer.ffn_norm_enc   = create_tensor(tn(LLM_TENSOR_ENC_FFN_NORM, "weight", i), {n_embd}, 0);
+                        layer.ffn_norm_enc_b = create_tensor(tn(LLM_TENSOR_ENC_FFN_NORM, "bias",   i), {n_embd}, 0);
+                        layer.ffn_down_enc   = create_tensor(tn(LLM_TENSOR_ENC_FFN_DOWN, "weight", i), {n_ff, n_embd}, 0);
+                        layer.ffn_down_enc_b = create_tensor(tn(LLM_TENSOR_ENC_FFN_DOWN, "bias",   i), {n_embd}, 0);
+                        layer.ffn_up_enc     = create_tensor(tn(LLM_TENSOR_ENC_FFN_UP,   "weight", i), {n_embd, n_ff}, 0);
+                        layer.ffn_up_enc_b   = create_tensor(tn(LLM_TENSOR_ENC_FFN_UP,   "bias",   i), {n_ff}, 0);
+                    }
+
+                    // [AI] Decoder layers (all have biases)
+                    for (int i = 0; i < dec_n_layer; ++i) {
+                        auto & layer = layers[i];
+
+                        layer.attn_norm   = create_tensor(tn(LLM_TENSOR_DEC_ATTN_NORM, "weight", i), {n_embd}, 0);
+                        layer.attn_norm_b = create_tensor(tn(LLM_TENSOR_DEC_ATTN_NORM, "bias",   i), {n_embd}, 0);
+
+                        layer.wq = create_tensor(tn(LLM_TENSOR_DEC_ATTN_Q,   "weight", i), {n_embd, n_embd_k_gqa}, 0);
+                        layer.bq = create_tensor(tn(LLM_TENSOR_DEC_ATTN_Q,   "bias",   i), {n_embd_k_gqa}, 0);
+                        layer.wk = create_tensor(tn(LLM_TENSOR_DEC_ATTN_K,   "weight", i), {n_embd, n_embd_k_gqa}, 0);
+                        layer.bk = create_tensor(tn(LLM_TENSOR_DEC_ATTN_K,   "bias",   i), {n_embd_k_gqa}, 0);
+                        layer.wv = create_tensor(tn(LLM_TENSOR_DEC_ATTN_V,   "weight", i), {n_embd, n_embd_v_gqa}, 0);
+                        layer.bv = create_tensor(tn(LLM_TENSOR_DEC_ATTN_V,   "bias",   i), {n_embd_v_gqa}, 0);
+                        layer.wo = create_tensor(tn(LLM_TENSOR_DEC_ATTN_OUT, "weight", i), {n_embd_v_gqa, n_embd}, 0);
+                        layer.bo = create_tensor(tn(LLM_TENSOR_DEC_ATTN_OUT, "bias",   i), {n_embd}, 0);
+
+                        // decoder cross-attention
+                        layer.attn_norm_cross   = create_tensor(tn(LLM_TENSOR_DEC_CROSS_ATTN_NORM, "weight", i), {n_embd}, 0);
+                        layer.attn_norm_cross_b = create_tensor(tn(LLM_TENSOR_DEC_CROSS_ATTN_NORM, "bias",   i), {n_embd}, 0);
+
+                        layer.wq_cross = create_tensor(tn(LLM_TENSOR_DEC_CROSS_ATTN_Q,   "weight", i), {n_embd, n_embd_k_gqa}, 0);
+                        layer.bq_cross = create_tensor(tn(LLM_TENSOR_DEC_CROSS_ATTN_Q,   "bias",   i), {n_embd_k_gqa}, 0);
+                        layer.wk_cross = create_tensor(tn(LLM_TENSOR_DEC_CROSS_ATTN_K,   "weight", i), {n_embd, n_embd_k_gqa}, 0);
+                        layer.bk_cross = create_tensor(tn(LLM_TENSOR_DEC_CROSS_ATTN_K,   "bias",   i), {n_embd_k_gqa}, 0);
+                        layer.wv_cross = create_tensor(tn(LLM_TENSOR_DEC_CROSS_ATTN_V,   "weight", i), {n_embd, n_embd_v_gqa}, 0);
+                        layer.bv_cross = create_tensor(tn(LLM_TENSOR_DEC_CROSS_ATTN_V,   "bias",   i), {n_embd_v_gqa}, 0);
+                        layer.wo_cross = create_tensor(tn(LLM_TENSOR_DEC_CROSS_ATTN_OUT, "weight", i), {n_embd_v_gqa, n_embd}, 0);
+                        layer.bo_cross = create_tensor(tn(LLM_TENSOR_DEC_CROSS_ATTN_OUT, "bias",   i), {n_embd}, 0);
+
+                        // decoder FFN
+                        layer.ffn_norm   = create_tensor(tn(LLM_TENSOR_DEC_FFN_NORM, "weight", i), {n_embd}, 0);
+                        layer.ffn_norm_b = create_tensor(tn(LLM_TENSOR_DEC_FFN_NORM, "bias",   i), {n_embd}, 0);
+
+                        layer.ffn_down   = create_tensor(tn(LLM_TENSOR_DEC_FFN_DOWN, "weight", i), {n_ff, n_embd}, 0);
+                        layer.ffn_down_b = create_tensor(tn(LLM_TENSOR_DEC_FFN_DOWN, "bias",   i), {n_embd}, 0);
+                        layer.ffn_up     = create_tensor(tn(LLM_TENSOR_DEC_FFN_UP,   "weight", i), {n_embd, n_ff}, 0);
+                        layer.ffn_up_b   = create_tensor(tn(LLM_TENSOR_DEC_FFN_UP,   "bias",   i), {n_ff}, 0);
+                    }
+                } break;
             case LLM_ARCH_JAIS:
                 {
                     tok_embd = create_tensor(tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
@@ -8534,6 +8648,20 @@ ggml_cgraph * llama_model::build_graph(const llm_graph_params & params) const {
                 llm = std::make_unique<llm_build_t5_enc>(*this, params);
             }
             break;
+        case LLM_ARCH_NLLB:
+            {
+                switch (params.gtype) {
+                    case LLM_GRAPH_TYPE_ENCODER:
+                        llm = std::make_unique<llm_build_nllb_enc>(*this, params);
+                        break;
+                    case LLM_GRAPH_TYPE_DEFAULT:
+                    case LLM_GRAPH_TYPE_DECODER:
+                        llm = std::make_unique<llm_build_nllb_dec>(*this, params);
+                        break;
+                    default:
+                        GGML_ABORT("invalid graph type");
+                };
+            } break;
         case LLM_ARCH_JAIS:
             {
                 llm = std::make_unique<llm_build_jais>(*this, params);
@@ -8865,6 +8993,7 @@ llama_rope_type llama_model_rope_type(const llama_model * model) {
         case LLM_ARCH_MAMBA2:
         case LLM_ARCH_JAMBA:
         case LLM_ARCH_JINA_BERT_V2:
+        case LLM_ARCH_NLLB:
         case LLM_ARCH_T5:
         case LLM_ARCH_T5ENCODER:
         case LLM_ARCH_JAIS:
@@ -9097,6 +9226,7 @@ bool llama_model_has_encoder(const llama_model * model) {
     switch (model->arch) {
         case LLM_ARCH_T5:        return true;
         case LLM_ARCH_T5ENCODER: return true;
+        case LLM_ARCH_NLLB:      return true;  // [AI] NLLB is encoder-decoder
         default:                 return false;
     }
 }
