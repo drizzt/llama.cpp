@@ -1,0 +1,44 @@
+name: Sync with Upstream
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # Every 6 hours
+  workflow_dispatch: # Manual trigger
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add Upstream
+        run: git remote add upstream https://github.com/ggml-org/llama.cpp.git
+
+      - name: Fetch Upstream
+        run: git fetch upstream master
+
+      - name: Rebase from Upstream
+        run: git rebase upstream/master
+
+      - name: Push Changes
+        run: git push origin master --force-with-lease
+
+      - name: Trigger Build & Release Workflows
+        run: |
+          gh workflow run build.yml --ref master --repo ${{ github.repository }}
+          gh workflow run release.yml --ref master --repo ${{ github.repository }} -f create_release=true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
