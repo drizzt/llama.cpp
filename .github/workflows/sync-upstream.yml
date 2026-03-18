@@ -1,0 +1,75 @@
+name: Sync with Upstream
+
+on:
+  schedule:
+    - cron: '0 */6 * * *' # Every 6 hours
+  workflow_dispatch: # Manual trigger
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+          token: ${{ secrets.PAT }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add Upstream
+        run: git remote add upstream https://github.com/ggml-org/llama.cpp.git
+
+      - name: Fetch Upstream
+        run: git fetch upstream master
+
+      - name: Rebase from Upstream
+        id: rebase
+        run: git rebase upstream/master || echo "REBASE_FAILED=true" >> $GITHUB_OUTPUT
+
+      - name: Install Kilo CLI
+        if: steps.rebase.outputs.REBASE_FAILED == 'true'
+        run: npm install -g @kilocode/cli
+
+      - name: Resolve Conflicts
+        if: steps.rebase.outputs.REBASE_FAILED == 'true'
+        env:
+          KILO_API_KEY: ${{ secrets.KILO_API_KEY }}
+          KILO_MODEL: ${{ vars.KILO_MODEL }}
+        run: |
+          kilo run --auto \
+            --model "${KILO_MODEL:-kilo/kilo-auto/free}" \
+            "$(cat <<'EOF'
+          The repository is mid-rebase with conflicts. Run \`git status\` first to
+          see which files are conflicted. For each conflicted file:
+          1. Read both sides of the conflict markers carefully.
+          2. This is a fork of llama.cpp with custom patches. The fork's changes
+             (<<<<<<< HEAD) are intentional divergence and must be preserved.
+          3. Adapt the fork's patch to upstream's new code if upstream refactored
+             the surrounding area; do not silently drop our changes.
+          4. If upstream already merged equivalent functionality, prefer upstream's
+             version and drop ours only if they are truly redundant.
+          5. \`git add\` each file after resolving, then \`git rebase --continue\`.
+          6. If a conflict is too ambiguous to resolve safely, abort with
+             \`git rebase --abort\`, create a file REBASE_NOTES.md explaining which
+             commit and file need human review, and exit 1.
+          EOF
+          )"
+
+      - name: Push Changes
+        run: git push origin master --force-with-lease
+
+      - name: Trigger Build & Release Workflows
+        run: |
+          gh workflow run build.yml --ref master --repo ${{ github.repository }}
+          gh workflow run release.yml --ref master --repo ${{ github.repository }} -f create_release=true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
