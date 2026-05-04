@@ -31,6 +31,11 @@ jobs:
       - name: Fetch Upstream
         run: git fetch upstream master
 
+      - name: Stage Sync Script
+        run: |
+          cp .github/scripts/sync-upstream-kilo.sh "$RUNNER_TEMP/sync-upstream-kilo.sh"
+          chmod +x "$RUNNER_TEMP/sync-upstream-kilo.sh"
+
       - name: Rebase from Upstream
         id: rebase
         continue-on-error: true
@@ -45,7 +50,7 @@ jobs:
         env:
           KILO_API_KEY: ${{ secrets.KILO_API_KEY }}
           KILO_MODEL: ${{ vars.KILO_MODEL }}
-        run: bash .github/scripts/sync-upstream-kilo.sh resolve-conflicts
+        run: bash "$RUNNER_TEMP/sync-upstream-kilo.sh" resolve-conflicts
 
       - name: Configure Build
         id: configure
@@ -72,7 +77,7 @@ jobs:
         env:
           KILO_API_KEY: ${{ secrets.KILO_API_KEY }}
           KILO_MODEL: ${{ vars.KILO_MODEL }}
-        run: bash .github/scripts/sync-upstream-kilo.sh fix-build
+        run: bash "$RUNNER_TEMP/sync-upstream-kilo.sh" fix-build
 
       - name: Stop Before Push If Preflight Failed
         if: ${{ always() && (steps.configure.outcome == 'failure' || steps.build.outcome == 'failure') && steps.fix_build.outcome != 'success' }}
@@ -81,7 +86,7 @@ jobs:
           exit 1
 
       - name: Ensure No Uncommitted Changes
-        run: bash .github/scripts/sync-upstream-kilo.sh verify-clean
+        run: bash "$RUNNER_TEMP/sync-upstream-kilo.sh" verify-clean
 
       - name: Push Changes
         run: git push origin master --force-with-lease
