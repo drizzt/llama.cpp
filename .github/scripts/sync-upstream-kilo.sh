@@ -58,6 +58,7 @@ allow_path() {
     local path="$1"
     local dir=""
     local part
+    local -a parts
 
     IFS='/' read -r -a parts <<< "$path"
     for ((i = 0; i < ${#parts[@]} - 1; i++)); do
@@ -69,6 +70,9 @@ allow_path() {
         fi
         printf '!%s/\n' "$dir"
     done
+    if [ "${#parts[@]}" -gt 1 ]; then
+        printf '!%s/**\n' "$dir"
+    fi
     printf '!%s\n' "$path"
 }
 
@@ -117,6 +121,36 @@ run_kilo() {
     return "$status"
 }
 
+run_kilo_with_retry() {
+    local log_file="$1"
+    local prompt_file="$2"
+    local max_attempts="${KILO_MAX_ATTEMPTS:-3}"
+    local max_delay="${KILO_MAX_BACKOFF:-60}"
+    local status=0
+    local delay=5
+    local attempt
+
+    if ! [[ "$max_attempts" =~ ^[1-9][0-9]*$ ]]; then
+        log "Invalid KILO_MAX_ATTEMPTS=${max_attempts}; expected positive integer."
+        return 2
+    fi
+
+    for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+        status=0
+        run_kilo "$log_file" "$prompt_file" || status=$?
+
+        if [ "$status" -eq 75 ] && [ "$attempt" -lt "$max_attempts" ]; then
+            log "Kilo provider failure on attempt ${attempt}/${max_attempts}; retrying in ${delay}s."
+            sleep "$delay"
+            delay=$((delay * 3))
+            [ "$delay" -gt "$max_delay" ] && delay="$max_delay"
+            continue
+        fi
+        return "$status"
+    done
+    return "$status"
+}
+
 write_conflict_prompt() {
     local file="$1"
     local prompt_file="$CTX_DIR/prompt.txt"
@@ -160,9 +194,11 @@ resolve_conflicts() {
             prompt_file="$CTX_DIR/prompt.txt"
             log_file="$CTX_DIR/kilo-conflict.log"
 
-            if ! run_kilo "$log_file" "$prompt_file"; then
-                log "Kilo failed while resolving ${file}."
-                exit 1
+            local kilo_status=0
+            run_kilo_with_retry "$log_file" "$prompt_file" || kilo_status=$?
+            if [ "$kilo_status" -ne 0 ]; then
+                log "Kilo failed while resolving ${file} (status ${kilo_status})."
+                exit "$kilo_status"
             fi
             if [ -f REBASE_NOTES.md ]; then
                 log "REBASE_NOTES.md exists; human review is required."
@@ -281,15 +317,9 @@ fix_build() {
         prompt_file="$CTX_DIR/prompt.txt"
         log_file="$CTX_DIR/kilo-build-fix.log"
 
-        set +e
-        run_kilo "$log_file" "$prompt_file"
-        status=$?
-        set -e
+        status=0
+        run_kilo_with_retry "$log_file" "$prompt_file" || status=$?
 
-        if [ "$status" -eq 75 ] && [ "$attempt" -lt "$max_attempts" ]; then
-            sleep 10
-            continue
-        fi
         if [ "$status" -ne 0 ]; then
             log "Kilo exited with status ${status}."
             exit "$status"
