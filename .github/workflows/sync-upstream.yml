@@ -36,6 +36,20 @@ jobs:
           cp .github/scripts/sync-upstream-kilo.sh "$RUNNER_TEMP/sync-upstream-kilo.sh"
           chmod +x "$RUNNER_TEMP/sync-upstream-kilo.sh"
 
+      - name: Restore rerere cache
+        id: rerere_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .git/rr-cache
+          key: rerere-cache-${{ github.run_id }}
+          restore-keys: |
+            rerere-cache-
+
+      - name: Enable rerere
+        run: |
+          git config rerere.enabled true
+          git config rerere.autoupdate true
+
       - name: Rebase from Upstream
         id: rebase
         continue-on-error: true
@@ -97,3 +111,10 @@ jobs:
           gh workflow run release.yml --ref master --repo ${{ github.repository }} -f create_release=true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Save rerere cache
+        if: ${{ always() && steps.rerere_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@v4
+        with:
+          path: .git/rr-cache
+          key: rerere-cache-${{ github.run_id }}
